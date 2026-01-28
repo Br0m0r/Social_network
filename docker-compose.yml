@@ -1,0 +1,193 @@
+# Network for service-to-service communication
+networks:
+  social-network:
+    driver: bridge
+
+services:
+  # Migration job - runs once and exits
+  migrate:
+    build:
+      context: .
+      dockerfile: ./db/migrate.Dockerfile
+    container_name: migrate
+    command: ["-path", "/db/migrations", "-database", "sqlite3:///db/social_network.db", "up"]
+    volumes:
+      - ./db:/db:rw
+    networks:
+      - social-network
+
+  # Auth Service - services/auth/main.go runs on port 8081
+  auth-service:
+    build:
+      context: .  # Build from root, not ./services/auth
+      dockerfile: ./services/auth/Dockerfile
+    container_name: auth-service
+    ports:
+      - "8081:8081"
+    networks:
+      - social-network
+    environment:
+      - DATABASE_PATH=/app/db/social_network.db
+    volumes:
+      - ./db:/app/db:rw
+
+  # User Service - services/users/main.go runs on port 8082
+  user-service:
+    build:
+      context: .  # Build from root, not ./services/users
+      dockerfile: ./services/users/Dockerfile
+    container_name: user-service
+    ports:
+      - "8082:8082"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      auth-service:  # User service needs auth service for token verification
+        condition: service_started
+      notification-service:  # User service sends notifications on follow
+        condition: service_started
+    networks:
+      - social-network
+    environment:
+      - DATABASE_PATH=/app/db/social_network.db
+      - AUTH_SERVICE_URL=http://auth-service:8081  # How user service finds auth service
+      - NOTIFICATION_SERVICE_URL=http://notification-service:8086  # For sending follow notifications
+    volumes:
+      - ./db:/app/db:rw
+      - ./services/users/uploads:/root/uploads:rw
+
+  # Post Service - services/posts/main.go runs on port 8083
+  post-service:
+    build:
+      context: .  # Build from root
+      dockerfile: ./services/posts/Dockerfile
+    container_name: post-service
+    ports:
+      - "8083:8083"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      auth-service:  # Post service needs auth service for token verification
+        condition: service_started
+      notification-service:  # Post service sends notifications on comments
+        condition: service_started
+    networks:
+      - social-network
+    environment:
+      - DATABASE_PATH=/app/db/social_network.db
+      - AUTH_SERVICE_URL=http://auth-service:8081  # How post service finds auth service
+      - NOTIFICATION_SERVICE_URL=http://notification-service:8086  # For sending comment notifications
+      - PORT=8083
+    volumes:
+      - ./db:/app/db:rw
+      - ./services/posts/uploads:/app/uploads:rw
+
+  # Group Service - services/groups/main.go runs on port 8084
+  group-service:
+    build:
+      context: .  # Build from root
+      dockerfile: ./services/groups/Dockerfile
+    container_name: group-service
+    ports:
+      - "8084:8084"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      auth-service:  # Group service needs auth service for token verification
+        condition: service_started
+      notification-service:  # Group service sends notifications on invites/events
+        condition: service_started
+    networks:
+      - social-network
+    environment:
+      - DATABASE_PATH=/app/db/social_network.db
+      - AUTH_SERVICE_URL=http://auth-service:8081  # How group service finds auth service
+      - NOTIFICATION_SERVICE_URL=http://notification-service:8086  # For sending group notifications
+    volumes:
+      - ./db:/app/db:rw
+      - ./services/groups/uploads:/app/uploads:rw
+
+  # Chat Service - services/chat/main.go runs on port 8085
+  chat-service:
+    build:
+      context: .  # Build from root
+      dockerfile: ./services/chat/Dockerfile
+    container_name: chat-service
+    ports:
+      - "8085:8085"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      auth-service:  # Chat service needs auth service for token verification
+        condition: service_started
+      notification-service:  # Chat service sends notifications for offline messages
+        condition: service_started
+    networks:
+      - social-network
+    environment:
+      - DATABASE_PATH=/app/db/social_network.db
+      - AUTH_SERVICE_URL=http://auth-service:8081  # How chat service finds auth service
+      - NOTIFICATION_SERVICE_URL=http://notification-service:8086  # For sending message notifications
+    volumes:
+      - ./db:/app/db:rw
+      - ./services/chat/uploads:/app/uploads:rw
+
+  # Notification Service - services/notifications/main.go runs on port 8086
+  notification-service:
+    build:
+      context: .  # Build from root
+      dockerfile: ./services/notifications/Dockerfile
+    container_name: notification-service
+    ports:
+      - "8086:8086"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      auth-service:  # Notification service needs auth service for token verification
+        condition: service_started
+    networks:
+      - social-network
+    environment:
+      - DATABASE_PATH=/app/db/social_network.db
+      - AUTH_SERVICE_URL=http://auth-service:8081  # How notification service finds auth service
+    volumes:
+      - ./db:/app/db:rw
+
+  # Frontend Service - Vue.js with Vite, served by 'serve' on port 3000
+  frontend:
+    build:
+      context: .  # Build from root
+      dockerfile: ./frontend/Dockerfile
+    container_name: frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      auth-service:
+        condition: service_started
+      user-service:
+        condition: service_started
+      post-service:
+        condition: service_started
+      group-service:
+        condition: service_started
+      chat-service:
+        condition: service_started
+      notification-service:
+        condition: service_started
+    networks:
+      - social-network
+
+# To run:
+# docker-compose up --build
+# 
+# To test:
+# curl http://localhost:8081/health  (auth service)
+# curl http://localhost:8082/health  (user service)
+# curl http://localhost:8083/health  (post service)
+# curl http://localhost:8084/health  (group service)
+# curl http://localhost:8085/health  (chat service)
+# curl http://localhost:8086/health  (notification service)
+# http://localhost:3000              (frontend - open in browser)
+#
+# Database: SQLite file shared via volume mount
+# Each service connects directly to ./db/social_network.db
